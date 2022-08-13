@@ -79,7 +79,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	// testing
 	if m.Content == "ping" {
-		s.ChannelMessageSend(m.ChannelID, "Pong!")
+		//s.ChannelMessageSend(m.ChannelID, "Pong!")
 	}
 
 	if strings.HasPrefix(m.Content, "!q2 ") {
@@ -102,7 +102,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 				for _, v := range m.Attachments {
 					filename, valid := ValidateFile(strings.ToLower(v.URL))
 					if !valid {
-						s.ChannelMessageSend(m.ChannelID, "Invalid file, ignoring.")
+						s.ChannelMessageSend(m.ChannelID, "Invalid start, `*.bsp` only please")
 						return
 					}
 
@@ -123,7 +123,8 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 // returns: filename, boolean for acceptable or not
 //
 func ValidateFile(url string) (string, bool) {
-	validexts := []string{"bsp","zip","pak","pkz"}
+	//validexts := []string{"bsp","zip","pak","pkz"}
+	validexts := []string{"bsp"} // for now
 
 	parts := strings.Split(url,  "/")
 	if len(parts) < 1 {
@@ -255,7 +256,5 @@ func SyncWithServers() {
 	if err != nil {
 		fmt.Println(err)
 	}
-
-	fmt.Println(string(out))
 }
 
