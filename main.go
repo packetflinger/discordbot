@@ -20,12 +20,15 @@ import (
 var (
 	Token string
 	Channels string
+	Chans []string
 )
 
 func init() {
 	flag.StringVar(&Token, "t", "", "Bot Token")
 	flag.StringVar(&Channels, "c", "", "The channels to listen in")
 	flag.Parse()
+
+	Chans = strings.Split(Channels, ",")
 }
 
 func main() {
@@ -72,31 +75,32 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 
 	if strings.HasPrefix(m.Content, "!q2 ") {
-		parts := strings.Split(m.Content, " ")
-		if len(parts) < 2 {
-			return
-		}
-
-		q2server := parts[1]
-		go func(srv string, ch string) {
-			status := ServerStatus(srv)
-			s.ChannelMessageSend(ch, status)
-		}(q2server, m.ChannelID)
+		go func() {
+			parts := strings.Split(m.Content, " ")
+			if len(parts) < 2 {
+				return
+			}
+			q2server := parts[1]
+			status := ServerStatus(q2server)
+			s.ChannelMessageSend(m.ChannelID, status)
+		}()
 		return
 	}
 
 	// only process attachments in designated channels
-	if m.ChannelID == Channels {
+	if Contains(m.ChannelID, Chans) {
 		if len(m.Attachments) > 0 {
-			for _, v := range m.Attachments {
-				filename, valid := ValidateFile(strings.ToLower(v.URL))
-				if !valid {
-					s.ChannelMessageSend(m.ChannelID, "Invalid file, ignoring.")
-					return
-				}
+			go func() {
+				for _, v := range m.Attachments {
+					filename, valid := ValidateFile(strings.ToLower(v.URL))
+					if !valid {
+						s.ChannelMessageSend(m.ChannelID, "Invalid file, ignoring.")
+						return
+					}
 
-				DownloadFile("./"+filename, v.URL)
-			}
+					DownloadFile("./"+filename, v.URL)
+				}
+			}()
 		}
 	}
 }
