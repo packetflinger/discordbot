@@ -29,6 +29,11 @@ func init() {
 	flag.StringVar(&Channels, "c", "", "The channels to listen in")
 	flag.Parse()
 
+	if Token == "" {
+		flag.Usage()
+		panic("")
+	}
+
 	Chans = strings.Split(Channels, ",")
 }
 
@@ -249,3 +254,4 @@ func SyncWithServers() {
 
 	fmt.Println(string(out))
 }
+
