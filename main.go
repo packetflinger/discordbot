@@ -107,7 +107,9 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 					}
 
 					DownloadFile(SavePath + "/" + filename, v.URL)
+					s.ChannelMessageSend(m.ChannelID, "Adding map...")
 					SyncWithServers()
+					s.ChannelMessageSend(m.ChannelID, "finished.")
 				}
 			}()
 		}
