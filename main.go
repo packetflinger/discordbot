@@ -211,7 +211,7 @@ func ServerStatus(q2server string) string {
 		return q2server + " - Connection error"
 	}
 	defer conn.Close()
-	conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 
 	cmd := []byte{0xff, 0xff, 0xff, 0xff}
 	cmd = append(cmd, "status"...)
