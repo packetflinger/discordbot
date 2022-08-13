@@ -21,12 +21,14 @@ import (
 var (
 	Token string
 	Channels string
+	SavePath string
 	Chans []string
 )
 
 func init() {
 	flag.StringVar(&Token, "t", "", "Bot Token")
 	flag.StringVar(&Channels, "c", "", "The channels to listen in")
+	flag.StringVar(&SavePath, "p", ".", "Path to save maps prior to syncing") 
 	flag.Parse()
 
 	if Token == "" {
@@ -104,7 +106,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 						return
 					}
 
-					DownloadFile("./"+filename, v.URL)
+					DownloadFile(SavePath + "/" + filename, v.URL)
 					SyncWithServers()
 				}
 			}()
