@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"io"
@@ -19,21 +20,34 @@ import (
 )
 
 var (
-	Token string
+	Token    string
 	Channels string
 	SavePath string
-	Chans []string
+	Chans    []string
+	STDOut   bool
 )
 
 func init() {
+	f, err := os.OpenFile("bot.log", os.O_WRONLY | os.O_CREATE | os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatalf("error opening file: %v", err)
+	}
+
 	flag.StringVar(&Token, "t", "", "Bot Token")
 	flag.StringVar(&Channels, "c", "", "The channels to listen in")
 	flag.StringVar(&SavePath, "p", ".", "Path to save maps prior to syncing") 
+	flag.BoolVar(&STDOut, "stdout", false, "Log to STDOUT instead of the logfile")
 	flag.Parse()
+
+	if !STDOut {
+		log.SetOutput(f)
+	} else {
+		f.Close()
+	}
 
 	if Token == "" {
 		flag.Usage()
-		panic("")
+		log.Panic("")
 	}
 
 	Chans = strings.Split(Channels, ",")
@@ -43,7 +57,7 @@ func main() {
 
 	bot, err := discordgo.New("Bot " + Token)
 	if err != nil {
-		fmt.Println("error creating Discord session,", err)
+		log.Println("error creating Discord session,", err)
 		return
 	}
 
@@ -55,10 +69,11 @@ func main() {
 	// Open a websocket connection to Discord and begin listening.
 	err = bot.Open()
 	if err != nil {
-		fmt.Println("error opening connection,", err)
+		log.Println("error opening connection,", err)
 		return
 	}
 
+	log.Printf("PF Discord Bot Running...\n")
 	// Wait here until CTRL-C or other term signal is received.
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
@@ -77,20 +92,17 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
-	// testing
-	if m.Content == "ping" {
-		//s.ChannelMessageSend(m.ChannelID, "Pong!")
-	}
-
 	if strings.HasPrefix(m.Content, "!q2 ") {
 		go func() {
 			parts := strings.Split(m.Content, " ")
 			if len(parts) < 2 {
 				return
 			}
+
 			q2server := parts[1]
 			status := ServerStatus(q2server)
 			s.ChannelMessageSend(m.ChannelID, status)
+			log.Printf("%s[%s] requesting server status: %s\n", m.Author.Username, m.Author.ID, q2server)
 		}()
 		return
 	}
@@ -107,10 +119,16 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 					}
 
 					DownloadFile(SavePath + "/" + filename, v.URL)
-					s.ChannelMessageSend(m.ChannelID, "Adding map...")
-					SyncWithServers()
-					s.ChannelMessageSend(m.ChannelID, "finished.")
+					s.ChannelMessageSend(m.ChannelID, "Adding map " + filename)
+
+					log.Printf("%s[%s] added map %s\n", m.Author.Username, m.Author.ID, filename)
 				}
+
+				s.ChannelMessageSend(m.ChannelID, "Syncing...(usually takes 60s or so)")
+				log.Println("Syncing")
+				SyncWithServers()
+				s.ChannelMessageSend(m.ChannelID, "finished.")
+				log.Println("Sync finished")
 			}()
 		}
 	}
@@ -189,7 +207,7 @@ func ServerStatus(q2server string) string {
 	// only use IPv4
 	conn, err := net.Dial("udp4", q2server)
 	if err != nil {
-		fmt.Printf("Connection error %v\n", err)
+		log.Printf("Connection error %v\n", err)
 		return q2server + " - Connection error"
 	}
 	defer conn.Close()
@@ -201,7 +219,7 @@ func ServerStatus(q2server string) string {
 
 	_, err = bufio.NewReader(conn).Read(p)
 	if err != nil {
-		fmt.Println("Read error:", err)
+		log.Println("Read error:", err)
 		return "Read error"
 	}
 
@@ -237,6 +255,17 @@ func ServerStatus(q2server string) string {
 		info["player_count"],
 		info["maxclients"])
 
+	if info["gamedir"] == "opentdm" {
+		if info["time_remaining"] != "WARMUP" {
+			output = fmt.Sprintf(
+				"%s\nMatch time remaining: %s\nScore: %s:%s",
+				output,
+				info["time_remaining"],
+				info["score_a"],
+				info["score_b"])
+		}
+	}
+
 	pcount, _ := strconv.Atoi(info["player_count"])
 
 	if pcount > 0 {
@@ -252,9 +281,9 @@ func ServerStatus(q2server string) string {
 }
 
 func SyncWithServers() {
-	out, err := exec.Command("./push.sh").Output()
+	_, err := exec.Command("./push.sh").Output()
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 	}
 }
 
