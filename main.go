@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -99,6 +100,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 					}
 
 					DownloadFile("./"+filename, v.URL)
+					SyncWithServers()
 				}
 			}()
 		}
@@ -237,4 +239,13 @@ func ServerStatus(q2server string) string {
 	}
 
 	return output
+}
+
+func SyncWithServers() {
+	out, err := exec.Command("./push.sh").Output()
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	fmt.Println(string(out))
 }
