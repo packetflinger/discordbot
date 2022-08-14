@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -20,22 +21,37 @@ import (
 )
 
 var (
-	Token    string
-	Channels string
-	SavePath string
-	Chans    []string
-	STDOut   bool
+	MapChans    []string
+	StatusChans []string
+	SavePath    string
+	STDOut      bool
 )
 
+type Config struct {
+	Token          string `json:"token"`
+	MapChannels    string `json:"mapchannels"`
+	StatusChannels string `json:"statuschannels"`
+}
+
+var config Config
+
 func init() {
+	configfile := "bot.json"
+	confjson, err := os.ReadFile(configfile)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = json.Unmarshal(confjson, &config)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	f, err := os.OpenFile("bot.log", os.O_WRONLY | os.O_CREATE | os.O_APPEND, 0644)
 	if err != nil {
 		log.Fatalf("error opening file: %v", err)
 	}
 
-	flag.StringVar(&Token, "t", "", "Bot Token")
-	flag.StringVar(&Channels, "c", "", "The channels to listen in")
-	flag.StringVar(&SavePath, "p", ".", "Path to save maps prior to syncing") 
 	flag.BoolVar(&STDOut, "stdout", false, "Log to STDOUT instead of the logfile")
 	flag.Parse()
 
@@ -45,17 +61,18 @@ func init() {
 		f.Close()
 	}
 
-	if Token == "" {
+	if config.Token == "" {
 		flag.Usage()
 		log.Panic("")
 	}
 
-	Chans = strings.Split(Channels, ",")
+	MapChans = strings.Split(config.MapChannels, ",")
+	StatusChans = strings.Split(config.StatusChannels, ",")
 }
 
 func main() {
 
-	bot, err := discordgo.New("Bot " + Token)
+	bot, err := discordgo.New("Bot " + config.Token)
 	if err != nil {
 		log.Println("error creating Discord session,", err)
 		return
@@ -92,23 +109,22 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
-	if strings.HasPrefix(m.Content, "!q2 ") {
+	inputfields := strings.Fields(m.Content)
+	if inputfields[0] == "!q2" && Contains(m.ChannelID, StatusChans) {
 		go func() {
-			parts := strings.Split(m.Content, " ")
-			if len(parts) < 2 {
+			if len(inputfields) < 2 {
 				return
 			}
 
-			q2server := parts[1]
-			status := ServerStatus(q2server)
+			status := ServerStatus(inputfields[1])
 			s.ChannelMessageSend(m.ChannelID, status)
-			log.Printf("%s[%s] requesting server status: %s\n", m.Author.Username, m.Author.ID, q2server)
+			log.Printf("%s[%s] requesting server status: %s\n", m.Author.Username, m.Author.ID, inputfields[1])
 		}()
 		return
 	}
 
 	// only process attachments in designated channels
-	if Contains(m.ChannelID, Chans) {
+	if Contains(m.ChannelID, MapChans) {
 		if len(m.Attachments) > 0 {
 			go func() {
 				for _, v := range m.Attachments {
@@ -189,13 +205,31 @@ func DownloadFile(filepath string, url string) error {
 // helper function, if string is in slice
 //
 func Contains(needle string, haystack []string) bool {
+	yes := false
+
 	for i := range haystack {
+		if haystack[i] == "none" {
+			yes = false
+		}
+
+		if haystack[i] == "all" {
+			yes = true
+		}
+
+		if string(haystack[i][0]) == "-" && (haystack[i])[1:] == needle {
+			yes = false
+		}
+
+		if string(haystack[i][0]) == "+" && (haystack[i])[1:] == needle {
+			yes = true
+		}
+
 		if needle == haystack[i] {
-			return true
+			yes = true
 		}
 	}
 
-	return false
+	return yes
 }
 
 //
