@@ -1,0 +1,16 @@
+// compile with:
+// protoc --go_out=. --go_opt=paths=source_relative config.proto
+syntax="proto3";
+option go_package = "github.com/packetflinger/libq2/proto";
+package proto;
+
+message BotConfig {
+    string auth_token = 1;
+    repeated string status_channels = 2;
+    repeated string map_channels = 3;
+    bool foreground = 4;
+    string log_file = 5;
+    string map_path = 6;
+    string temp_path = 7;   // will use os.TempDir if empty
+    string repo_path = 8;
+}

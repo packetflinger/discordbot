@@ -1,323 +1,369 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
-	"net"
-	"net/http"
 	"io"
+	"log"
+	"net/http"
+	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
-	"strconv"
+	"path"
+	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/google/uuid"
+	"github.com/packetflinger/libq2/bsp"
+	"github.com/packetflinger/libq2/pak"
+	"github.com/packetflinger/libq2/proto"
+	"github.com/packetflinger/libq2/state"
+	"google.golang.org/protobuf/encoding/prototext"
+
+	pb "github.com/packetflinger/discordbot/proto"
 )
 
 var (
-	MapChans    []string
-	StatusChans []string
-	SavePath    string
-	STDOut      bool
+	configFile = flag.String("config", "", "Protobuf config file")
+	config     *pb.BotConfig
+	err        error
+	fileTypes  = []string{".bsp", ".pak", ".pkz", ".zip"}
 )
 
-type Config struct {
-	Token          string `json:"token"`
-	MapChannels    string `json:"mapchannels"`
-	StatusChannels string `json:"statuschannels"`
-}
-
-var config Config
-
-func init() {
-	configfile := "bot.json"
-	confjson, err := os.ReadFile(configfile)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	err = json.Unmarshal(confjson, &config)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	f, err := os.OpenFile("bot.log", os.O_WRONLY | os.O_CREATE | os.O_APPEND, 0644)
-	if err != nil {
-		log.Fatalf("error opening file: %v", err)
-	}
-
-	flag.BoolVar(&STDOut, "stdout", false, "Log to STDOUT instead of the logfile")
-	flag.Parse()
-
-	if !STDOut {
-		log.SetOutput(f)
-	} else {
-		f.Close()
-	}
-
-	if config.Token == "" {
-		flag.Usage()
-		log.Panic("")
-	}
-
-	MapChans = strings.Split(config.MapChannels, ",")
-	StatusChans = strings.Split(config.StatusChannels, ",")
-}
-
 func main() {
-
-	bot, err := discordgo.New("Bot " + config.Token)
+	flag.Parse()
+	config, err = loadConfig(*configFile)
 	if err != nil {
-		log.Println("error creating Discord session,", err)
-		return
+		log.Fatalln("error loading config:", err)
+	}
+	if !config.GetForeground() {
+		f, err := os.OpenFile(config.GetLogFile(), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+		if err != nil {
+			log.Fatalf("error opening log file: %v", err)
+		}
+		log.SetOutput(f)
+		defer f.Close()
+	}
+	if config.TempPath == "" {
+		config.TempPath = path.Join(os.TempDir(), "discordbot")
+	}
+	if _, err := os.Stat(config.TempPath); os.IsNotExist(err) {
+		err := os.Mkdir(config.TempPath, 0700)
+		if err != nil {
+			log.Fatalf("unable to create temp directory: %v\n", err)
+		}
+	}
+	log.Printf("using %q for temp space", config.TempPath)
+
+	if _, err := os.Stat(config.GetRepoPath()); os.IsNotExist(err) {
+		if err != nil {
+			log.Fatalf("repo path error: %v\n", err)
+		}
 	}
 
-	bot.AddHandler(messageCreate)
+	bot, err := discordgo.New("Bot " + config.GetAuthToken())
+	if err != nil {
+		log.Fatalln("error creating Discord session:", err)
+	}
+	bot.AddHandler(handleMessage)
 
 	// we only care about receiving message events.
 	bot.Identify.Intents = discordgo.IntentsGuildMessages
 
-	// Open a websocket connection to Discord and begin listening.
 	err = bot.Open()
 	if err != nil {
-		log.Println("error opening connection,", err)
-		return
+		log.Fatalln("error opening connection,", err)
 	}
+	log.Printf("Discord bot running...\n")
 
-	log.Printf("PF Discord Bot Running...\n")
 	// Wait here until CTRL-C or other term signal is received.
 	sc := make(chan os.Signal, 1)
-	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
+	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 	<-sc
 
 	bot.Close()
 }
 
+// loadConfig will read the textproto config file
 //
-// Called for every message seen
-//
-func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
+// The default config file is $HOME/.config/discordbot/config.pb
+func loadConfig(cf string) (*pb.BotConfig, error) {
+	if cf == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		cf = path.Join(home, ".config", "discordbot", "config.pb")
+	}
+	configData, err := os.ReadFile(cf)
+	if err != nil {
+		return nil, err
+	}
+	var config pb.BotConfig
+	err = prototext.Unmarshal(configData, &config)
+	if err != nil {
+		return nil, err
+	}
+	return &config, nil
+}
 
+// Called for every message seen
+func handleMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 	// Ignore our outgoing messages
 	if m.Author.ID == s.State.User.ID {
 		return
 	}
+	if len(m.Content) > 0 {
+		handleMessageText(s, m)
+	}
+	if len(m.Attachments) > 0 {
+		handleMessageAttachments(s, m)
+	}
+}
 
-	inputfields := strings.Fields(m.Content)
-	if inputfields[0] == "!q2" && Contains(m.ChannelID, StatusChans) {
-		go func() {
-			if len(inputfields) < 2 {
-				return
-			}
-
-			status := ServerStatus(inputfields[1])
-			s.ChannelMessageSend(m.ChannelID, status)
-			log.Printf("%s[%s] requesting server status: %s\n", m.Author.Username, m.Author.ID, inputfields[1])
-		}()
+// handleMessageText will process and respond to channel posts that have a
+// message containing text. Our own replies are filtered out before this is
+// called.
+func handleMessageText(s *discordgo.Session, m *discordgo.MessageCreate) {
+	tokens := strings.Fields(m.Content)
+	if len(tokens) < 2 {
 		return
 	}
+	if tokens[0] == "!q2" && Contains(m.ChannelID, config.GetStatusChannels()) {
+		go func() {
+			log.Printf("%s[%s] requesting server status: %s\n", m.Author.Username, m.Author.ID, tokens[1])
+			srv, err := state.NewServer(tokens[1])
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			info, err := srv.FetchInfo()
+			if err != nil {
+				log.Println("serverinfo fetch fail:", err)
+				return
+			}
+			status := FormatStatus(info)
+			s.ChannelMessageSend(m.ChannelID, status)
+		}()
+	}
+}
 
-	// only process attachments in designated channels
-	if Contains(m.ChannelID, MapChans) {
-		if len(m.Attachments) > 0 {
-			go func() {
-				for _, v := range m.Attachments {
-					filename, valid := ValidateFile(strings.ToLower(v.URL))
-					if !valid {
-						s.ChannelMessageSend(m.ChannelID, "Invalid start, `*.bsp` only please")
-						return
-					}
-
-					DownloadFile(SavePath + "/" + filename, v.URL)
-					s.ChannelMessageSend(m.ChannelID, "Adding map " + filename)
-
-					log.Printf("%s[%s] added map %s\n", m.Author.Username, m.Author.ID, filename)
+// handleMessageAttachments will inspect any file attachments to messages
+// posted in the channels, decide if it's something it should handle (maps),
+// download and do something with them.
+func handleMessageAttachments(s *discordgo.Session, m *discordgo.MessageCreate) {
+	if Contains(m.ChannelID, config.GetMapChannels()) {
+		go func() {
+			pm, err := s.UserChannelCreate(m.Author.ID)
+			if err != nil {
+				log.Println("error creating direct message channel:", err)
+			}
+			for _, v := range m.Attachments {
+				dl, err := url.Parse(v.URL)
+				if err != nil {
+					log.Printf("unable to parse %q as a url: %v\n", v.URL, err)
+					continue
 				}
+				extension := validFileExtension(dl.Path, fileTypes)
+				if extension == "" {
+					continue
+				}
+				data, err := grabFileContents(v.URL)
+				if err != nil {
+					log.Printf("error downloading %v: %v\n", v.URL, err)
+					continue
+				}
+				name := uuid.New().String()
+				dest := path.Join(config.TempPath, name)
+				err = os.WriteFile(dest, data, 0644)
+				if err != nil {
+					log.Printf("error writing %q: %v\n", dest, err)
+					continue
+				}
+				log.Printf("saving %q to %q\n", v.URL, dest)
 
-				s.ChannelMessageSend(m.ChannelID, "Syncing...(usually takes 60s or so)")
-				log.Println("Syncing")
-				SyncWithServers()
-				s.ChannelMessageSend(m.ChannelID, "finished.")
-				log.Println("Sync finished")
-			}()
+				switch extension {
+				case ".bsp":
+					processBSP(dest, s, pm)
+				case ".pak":
+					processPAK(dest, s, m)
+				}
+				//s.ChannelMessageSend(dm.ID, "Adding map "+filename)
+				//log.Printf("%s[%s] added map %s\n", m.Author.Username, m.Author.ID, filename)
+			}
+		}()
+	}
+}
+
+func processBSP(mapfile string, s *discordgo.Session, pm *discordgo.Channel) {
+	var msg string
+	bspfile, err := bsp.OpenBSPFile(mapfile)
+	if err != nil {
+		msg = fmt.Sprintf("invalid BPS file: %v\n", err)
+		log.Println(msg)
+		s.ChannelMessageSend(pm.ID, msg)
+		return
+	}
+	msg = fmt.Sprintf("Adding BSP file\n%d entities\n%d textures\n", len(bspfile.Ents), len(bspfile.FetchTextures()))
+	s.ChannelMessageSend(pm.ID, msg)
+}
+
+// If we're given a .pak file to add, it must contain the proper virtual file
+// system structure. It should contain a `/maps` folder containing any .bps
+// files, a `/textures` directory for textures, etc. Random files in the root
+// will not be committed.
+func processPAK(filename string, s *discordgo.Session, m *discordgo.MessageCreate) {
+	pm, err := s.UserChannelCreate(m.Author.ID)
+	if err != nil {
+		log.Println("error creating direct message channel:", err)
+	}
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		log.Printf("error reading pak data: %v\n", err)
+		msg := "sorry, I was unable to process " + filename
+		s.ChannelMessageSend(pm.ID, msg)
+		return
+	}
+	pakfile, err := pak.Unmarshal(data)
+	if err != nil {
+		log.Printf("error unmarshalling pak data: %v\n", err)
+		msg := fmt.Sprintf("%q invalid pak file", filename)
+		s.ChannelMessageSend(pm.ID, msg)
+		return
+	}
+	filesAdded := 0
+	for _, f := range pakfile.GetFiles() {
+		if hasPrefix(f.GetName(), []string{"maps/", "models/", "textures/", "env/", "sounds/", "pics/", "players/"}) {
+			err = writePakFileToRepo(f)
+			if err != nil {
+				log.Println(err)
+				continue
+			}
+			filesAdded++
 		}
 	}
+	if filesAdded > 0 {
+		git := NewGit(config.RepoPath)
+		err := git.add()
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		err = git.commit(pm.Name)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		err = git.Push()
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		msg := fmt.Sprintf("Files in `%s` have been committed to the our git repo", filename)
+		s.ChannelMessageSend(pm.ID, msg)
+		log.Printf("%q committed to git repo", filename)
+	}
 }
 
-//
-// Make sure the attached file is valid for processing:
-// - .bsp, .zip, .pak, .pkz only
-//
-// returns: filename, boolean for acceptable or not
-//
-func ValidateFile(url string) (string, bool) {
-	//validexts := []string{"bsp","zip","pak","pkz"}
-	validexts := []string{"bsp"} // for now
-
-	parts := strings.Split(url,  "/")
-	if len(parts) < 1 {
-		return "", false
-	}
-
-	filename := parts[len(parts)-1]
-
-	parts2 := strings.Split(filename, ".")
-	if len(parts2) < 2 {
-		return "", false
-	}
-
-	extension := parts2[1]
-
-	return filename, Contains(extension, validexts)
-}
-
-//
-// Actually download the file from discord's CDN
-//
-func DownloadFile(filepath string, url string) error {
-
-	// Get the data
-	resp, err := http.Get(url)
+func writePakFileToRepo(f *proto.PAKFile) error {
+	fullpath := path.Join(config.GetRepoPath(), f.Name)
+	err := os.MkdirAll(filepath.Dir(fullpath), 0755)
 	if err != nil {
-		return err
+		return fmt.Errorf("error creating full path: %v", err)
 	}
-	defer resp.Body.Close()
-
-	// Create the file
-	out, err := os.Create(filepath)
+	err = os.WriteFile(fullpath, f.Data, 0644)
 	if err != nil {
-		return err
+		return fmt.Errorf("error writing %q to repo: %v", fullpath, err)
 	}
-	defer out.Close()
-
-	// Write the data to file
-	_, err = io.Copy(out, resp.Body)
-	return err
+	return nil
 }
 
+// custom version of strings.HasPrefix() to check against a slice of possbile
+// prefixes. If any of them match, it returns true.
+func hasPrefix(filename string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(filename, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func validFileExtension(dl string, exts []string) string {
+	out := ""
+	for _, t := range exts {
+		if strings.HasSuffix(dl, t) {
+			out = t
+		}
+	}
+	return out
+}
+
+func grabFileContents(url string) ([]byte, error) {
+	out := []byte{}
+	r, err := http.Get(url)
+	if err != nil {
+		return out, err
+	}
+	defer r.Body.Close()
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		return out, err
+	}
+	return data, nil
+}
+
+// Helper function, if string is in slice
 //
-// helper function, if string is in slice
-//
+// Can use "all" in slice to match any
+// Can use "-something" in conjunction with "all" for an exception
 func Contains(needle string, haystack []string) bool {
 	yes := false
-
 	for i := range haystack {
-		if haystack[i] == "none" {
-			yes = false
-		}
-
 		if haystack[i] == "all" {
 			yes = true
 		}
-
 		if string(haystack[i][0]) == "-" && (haystack[i])[1:] == needle {
 			yes = false
 		}
-
 		if string(haystack[i][0]) == "+" && (haystack[i])[1:] == needle {
 			yes = true
 		}
-
 		if needle == haystack[i] {
 			yes = true
 		}
 	}
-
 	return yes
 }
 
-//
-// Fetch server status
-//
-func ServerStatus(q2server string) string {
-	p := make([]byte, 1500)
-
-	// only use IPv4
-	conn, err := net.Dial("udp4", q2server)
-	if err != nil {
-		log.Printf("Connection error %v\n", err)
-		return q2server + " - Connection error"
-	}
-	defer conn.Close()
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-
-	cmd := []byte{0xff, 0xff, 0xff, 0xff}
-	cmd = append(cmd, "status"...)
-	fmt.Fprintln(conn, string(cmd))
-
-	_, err = bufio.NewReader(conn).Read(p)
-	if err != nil {
-		log.Println("Read error:", err)
-		return "Read error"
-	}
-
-	lines := strings.Split(strings.Trim(string(p), " \n\t"), "\n")
-	serverinfo := lines[1][1:]
-	playerinfo := lines[2 : len(lines)-1]
-
-	info := map[string]string{}
-	vars := strings.Split(serverinfo, "\\")
-
-	for i := 0; i < len(vars); i += 2 {
-		info[strings.ToLower(vars[i])] = vars[i+1]
-	}
-
-	playercount := len(playerinfo)
-	info["player_count"] = fmt.Sprintf("%d", playercount)
-
-	if playercount > 0 {
-		players := ""
-
-		for _, p := range playerinfo {
-			player := strings.SplitN(p, " ", 3)
-			players = fmt.Sprintf("%s,%s", players, player[2])
-		}
-
-		info["players"] = players[1:]
-	}
-
+// Format the ServerInfo output for printing
+func FormatStatus(info state.ServerInfo) string {
 	output := fmt.Sprintf(
 		"%s\n%s - %s/%s",
-		info["hostname"],
-		info["mapname"],
-		info["player_count"],
-		info["maxclients"])
-
-	if info["gamedir"] == "opentdm" {
-		if info["time_remaining"] != "WARMUP" {
+		info.Server["hostname"],
+		info.Server["mapname"],
+		info.Server["player_count"],
+		info.Server["maxclients"],
+	)
+	if info.Server["gamedir"] == "opentdm" {
+		if info.Server["time_remaining"] != "WARMUP" {
 			output = fmt.Sprintf(
 				"%s\nMatch time remaining: %s\nScore: %s:%s",
 				output,
-				info["time_remaining"],
-				info["score_a"],
-				info["score_b"])
+				info.Server["time_remaining"],
+				info.Server["score_a"],
+				info.Server["score_b"],
+			)
 		}
 	}
-
-	pcount, _ := strconv.Atoi(info["player_count"])
-
-	if pcount > 0 {
-		players_array := strings.Split((info["players"])[1:len(info["players"])], "\",\"")
-		players := ""
-		for _, p := range players_array {
-			players = players + p + ", "
+	if len(info.Players) > 0 {
+		var players []string
+		for _, p := range info.Players {
+			players = append(players, p.Name)
 		}
-		output = fmt.Sprintf("%s\n[`%s`]", output, players[:len(players)-3])
+		output += fmt.Sprintf("\n[`%s`]", strings.Join(players, ", "))
 	}
-
 	return output
 }
-
-func SyncWithServers() {
-	_, err := exec.Command("./push.sh").Output()
-	if err != nil {
-		log.Println(err)
-	}
-}
-
