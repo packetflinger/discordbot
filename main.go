@@ -127,14 +127,17 @@ func handleMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 // message containing text. Our own replies are filtered out before this is
 // called.
 func handleMessageText(s *discordgo.Session, m *discordgo.MessageCreate) {
-	tokens := strings.Fields(m.Content)
-	if len(tokens) < 2 {
+	if len(m.Content) > 11 {
 		return
 	}
-	if tokens[0] == "!q2" && contains(m.ChannelID, config.GetStatusChannels()) {
+	if strings.HasPrefix(m.Content, "!q2 ") && contains(m.ChannelID, config.GetStatusChannels()) {
+		arg := m.Content[4:]
+		if strings.Contains(arg, " ") {
+			return
+		}
 		go func() {
-			log.Printf("%s[%s] requesting server status: %s\n", m.Author.Username, m.Author.ID, tokens[1])
-			srv, err := state.NewServer(tokens[1])
+			log.Printf("%s[%s] requesting server status: %s\n", m.Author.Username, m.Author.ID, arg)
+			srv, err := state.NewServer(arg)
 			if err != nil {
 				log.Println(err)
 				return
