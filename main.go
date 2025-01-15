@@ -131,7 +131,7 @@ func handleMessageText(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if len(tokens) < 2 {
 		return
 	}
-	if tokens[0] == "!q2" && Contains(m.ChannelID, config.GetStatusChannels()) {
+	if tokens[0] == "!q2" && contains(m.ChannelID, config.GetStatusChannels()) {
 		go func() {
 			log.Printf("%s[%s] requesting server status: %s\n", m.Author.Username, m.Author.ID, tokens[1])
 			srv, err := state.NewServer(tokens[1])
@@ -144,7 +144,7 @@ func handleMessageText(s *discordgo.Session, m *discordgo.MessageCreate) {
 				log.Println("serverinfo fetch fail:", err)
 				return
 			}
-			status := FormatStatus(info)
+			status := formatStatus(info)
 			s.ChannelMessageSend(m.ChannelID, status)
 		}()
 	}
@@ -154,7 +154,7 @@ func handleMessageText(s *discordgo.Session, m *discordgo.MessageCreate) {
 // posted in the channels, decide if it's something it should handle (maps),
 // download and do something with them.
 func handleMessageAttachments(s *discordgo.Session, m *discordgo.MessageCreate) {
-	if Contains(m.ChannelID, config.GetMapChannels()) {
+	if contains(m.ChannelID, config.GetMapChannels()) {
 		go func() {
 			pm, err := s.UserChannelCreate(m.Author.ID)
 			if err != nil {
@@ -319,7 +319,7 @@ func grabFileContents(url string) ([]byte, error) {
 //
 // Can use "all" in slice to match any
 // Can use "-something" in conjunction with "all" for an exception
-func Contains(needle string, haystack []string) bool {
+func contains(needle string, haystack []string) bool {
 	yes := false
 	for i := range haystack {
 		if haystack[i] == "all" {
@@ -339,7 +339,7 @@ func Contains(needle string, haystack []string) bool {
 }
 
 // Format the ServerInfo output for printing
-func FormatStatus(info state.ServerInfo) string {
+func formatStatus(info state.ServerInfo) string {
 	output := fmt.Sprintf(
 		"%s\n%s - %s/%s",
 		info.Server["hostname"],
