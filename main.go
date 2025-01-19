@@ -10,15 +10,11 @@ import (
 	"os"
 	"os/signal"
 	"path"
-	"path/filepath"
 	"strings"
 	"syscall"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
-	"github.com/packetflinger/libq2/bsp"
-	"github.com/packetflinger/libq2/pak"
-	"github.com/packetflinger/libq2/proto"
 	"github.com/packetflinger/libq2/state"
 	"google.golang.org/protobuf/encoding/prototext"
 
@@ -127,7 +123,7 @@ func handleMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 // message containing text. Our own replies are filtered out before this is
 // called.
 func handleMessageText(s *discordgo.Session, m *discordgo.MessageCreate) {
-	if len(m.Content) > 11 {
+	if len(m.Content) < 11 {
 		return
 	}
 	if strings.HasPrefix(m.Content, "!q2 ") && contains(m.ChannelID, config.GetStatusChannels()) {
@@ -159,10 +155,6 @@ func handleMessageText(s *discordgo.Session, m *discordgo.MessageCreate) {
 func handleMessageAttachments(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if contains(m.ChannelID, config.GetMapChannels()) {
 		go func() {
-			pm, err := s.UserChannelCreate(m.Author.ID)
-			if err != nil {
-				log.Println("error creating direct message channel:", err)
-			}
 			for _, v := range m.Attachments {
 				dl, err := url.Parse(v.URL)
 				if err != nil {
@@ -185,102 +177,32 @@ func handleMessageAttachments(s *discordgo.Session, m *discordgo.MessageCreate) 
 					log.Printf("error writing %q: %v\n", dest, err)
 					continue
 				}
-				log.Printf("saving %q to %q\n", v.URL, dest)
-
+				remoteURL, err := url.Parse(v.URL)
+				if err != nil {
+					log.Println("unable to parse url:", err)
+					continue
+				}
+				remoteFile := path.Base(remoteURL.Path)
+				log.Printf("downloading %q to %q\n", remoteFile, dest)
+				fu := FileUpload{
+					session:   s,
+					message:   m,
+					name:      remoteFile,
+					localName: dest,
+				}
 				switch extension {
 				case ".bsp":
-					processBSP(dest, s, pm)
+					fu.processBSP(dest)
 				case ".pak":
-					processPAK(dest, s, m)
+					fu.processPAK(dest)
+				case ".zip":
+					fu.processZIP(dest)
+				case ".pkz":
+					fu.processZIP(dest)
 				}
-				//s.ChannelMessageSend(dm.ID, "Adding map "+filename)
-				//log.Printf("%s[%s] added map %s\n", m.Author.Username, m.Author.ID, filename)
 			}
 		}()
 	}
-}
-
-func processBSP(mapfile string, s *discordgo.Session, pm *discordgo.Channel) {
-	var msg string
-	bspfile, err := bsp.OpenBSPFile(mapfile)
-	if err != nil {
-		msg = fmt.Sprintf("invalid BPS file: %v\n", err)
-		log.Println(msg)
-		s.ChannelMessageSend(pm.ID, msg)
-		return
-	}
-	msg = fmt.Sprintf("Adding BSP file\n%d entities\n%d textures\n", len(bspfile.Ents), len(bspfile.FetchTextures()))
-	s.ChannelMessageSend(pm.ID, msg)
-}
-
-// If we're given a .pak file to add, it must contain the proper virtual file
-// system structure. It should contain a `/maps` folder containing any .bps
-// files, a `/textures` directory for textures, etc. Random files in the root
-// will not be committed.
-func processPAK(filename string, s *discordgo.Session, m *discordgo.MessageCreate) {
-	pm, err := s.UserChannelCreate(m.Author.ID)
-	if err != nil {
-		log.Println("error creating direct message channel:", err)
-	}
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		log.Printf("error reading pak data: %v\n", err)
-		msg := "sorry, I was unable to process " + filename
-		s.ChannelMessageSend(pm.ID, msg)
-		return
-	}
-	pakfile, err := pak.Unmarshal(data)
-	if err != nil {
-		log.Printf("error unmarshalling pak data: %v\n", err)
-		msg := fmt.Sprintf("%q invalid pak file", filename)
-		s.ChannelMessageSend(pm.ID, msg)
-		return
-	}
-	filesAdded := 0
-	for _, f := range pakfile.GetFiles() {
-		if hasPrefix(f.GetName(), []string{"maps/", "models/", "textures/", "env/", "sounds/", "pics/", "players/"}) {
-			err = writePakFileToRepo(f)
-			if err != nil {
-				log.Println(err)
-				continue
-			}
-			filesAdded++
-		}
-	}
-	if filesAdded > 0 {
-		git := NewGit(config.RepoPath)
-		err := git.add()
-		if err != nil {
-			log.Println(err)
-			return
-		}
-		err = git.commit(pm.Name)
-		if err != nil {
-			log.Println(err)
-			return
-		}
-		err = git.Push()
-		if err != nil {
-			log.Println(err)
-			return
-		}
-		msg := fmt.Sprintf("Files in `%s` have been committed to the our git repo", filename)
-		s.ChannelMessageSend(pm.ID, msg)
-		log.Printf("%q committed to git repo", filename)
-	}
-}
-
-func writePakFileToRepo(f *proto.PAKFile) error {
-	fullpath := path.Join(config.GetRepoPath(), f.Name)
-	err := os.MkdirAll(filepath.Dir(fullpath), 0755)
-	if err != nil {
-		return fmt.Errorf("error creating full path: %v", err)
-	}
-	err = os.WriteFile(fullpath, f.Data, 0644)
-	if err != nil {
-		return fmt.Errorf("error writing %q to repo: %v", fullpath, err)
-	}
-	return nil
 }
 
 // custom version of strings.HasPrefix() to check against a slice of possbile
@@ -294,16 +216,19 @@ func hasPrefix(filename string, prefixes []string) bool {
 	return false
 }
 
+// Returns the extension (including ".") of the filename argument. Only
+// extensions in the approved list
 func validFileExtension(dl string, exts []string) string {
 	out := ""
 	for _, t := range exts {
-		if strings.HasSuffix(dl, t) {
+		if strings.HasSuffix(strings.ToLower(dl), t) {
 			out = t
 		}
 	}
 	return out
 }
 
+// Download the file from Discords HTTPS servers. Returns the actual data.
 func grabFileContents(url string) ([]byte, error) {
 	out := []byte{}
 	r, err := http.Get(url)

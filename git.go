@@ -37,7 +37,7 @@ func (g Git) add() error {
 	return nil
 }
 
-func (g Git) commit(author string) error {
+func (g Git) commit(msg string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getwd() error: %v", err)
@@ -48,8 +48,7 @@ func (g Git) commit(author string) error {
 			return fmt.Errorf("unable to change to repo path %q: %v", g.RepoPath, err)
 		}
 	}
-	commitMsg := fmt.Sprintf("submitted by %s from Discord", author)
-	commitCmd := exec.Command("git", "commit", "-m", commitMsg)
+	commitCmd := exec.Command("git", "commit", "-m", msg)
 	if err := commitCmd.Run(); err != nil {
 		return fmt.Errorf("error committing changes: %v", err)
 	}
